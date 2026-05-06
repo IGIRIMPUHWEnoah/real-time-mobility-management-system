@@ -1,0 +1,104 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum VehicleType {
+  MOTO
+  CAR
+  VAN
+}
+
+enum DriverStatus {
+  AVAILABLE
+  ON_TRIP
+  OFFLINE
+}
+
+enum RideStatus {
+  REQUESTED
+  MATCHED
+  CONFIRMED
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+model Driver {
+  id           String       @id @default(uuid()) @db.Uuid
+  name         String
+  rating       Float        @default(5.0)
+  vehicleType  VehicleType  @map("vehicle_type")
+  status       DriverStatus @default(OFFLINE)
+  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz
+  
+  locations    DriverLocation[]
+  assignments  Assignment[]
+
+  @@map("drivers")
+}
+
+model DriverLocation {
+  id         String   @id @default(uuid()) @db.Uuid
+  driverId   String   @map("driver_id") @db.Uuid
+  lat        Float
+  lng        Float
+  heading    Float
+  speedKmh   Float    @map("speed_kmh")
+  h3CellR9   String   @map("h3_cell_r9")
+  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz
+
+  driver     Driver   @relation(fields: [driverId], references: [id])
+
+  @@index([h3CellR9])
+  @@index([recordedAt])
+  @@map("driver_locations")
+}
+
+model Ride {
+  id             String     @id @default(uuid()) @db.Uuid
+  passengerId    String     @map("passenger_id") @db.Uuid
+  pickupLat      Float      @map("pickup_lat")
+  pickupLng      Float      @map("pickup_lng")
+  dropoffLat     Float      @map("dropoff_lat")
+  dropoffLng     Float      @map("dropoff_lng")
+  status         RideStatus @default(REQUESTED)
+  idempotencyKey String     @unique @map("idempotency_key")
+  createdAt      DateTime   @default(now()) @map("created_at") @db.Timestamptz
+
+  assignment     Assignment?
+
+  @@map("rides")
+}
+
+model Assignment {
+  id              String   @id @default(uuid()) @db.Uuid
+  rideId          String   @unique @map("ride_id") @db.Uuid
+  driverId        String   @map("driver_id") @db.Uuid
+  score           Float
+  scoreBreakdown  Json     @map("score_breakdown")
+  confirmedAt     DateTime @default(now()) @map("confirmed_at") @db.Timestamptz
+  expiredAt       DateTime? @map("expired_at") @db.Timestamptz
+
+  ride            Ride     @relation(fields: [rideId], references: [id])
+  driver          Driver   @relation(fields: [driverId], references: [id])
+
+  @@map("assignments")
+}
+
+model Event {
+  id          String   @id @default(uuid()) @db.Uuid
+  eventType   String   @map("event_type")
+  aggregateId String   @map("aggregate_id") @db.Uuid
+  payload     Json
+  occurredAt  DateTime @default(now()) @map("occurred_at") @db.Timestamptz
+
+  @@map("events")
+}

@@ -1,6 +1,6 @@
 import { Injectable, Module, Logger } from '@nestjs/common';
 import { EventPattern, Payload } from '@nestjs/microservices';
-import { PrismaService } from '../infrastructure/prisma/prisma.service';
+import { PrismaService } from '../../infrastructure/prisma/prisma.service';
 
 @Injectable()
 export class EventLoggerService {

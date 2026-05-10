@@ -58,7 +58,7 @@ scripts/                # Fleet Simulation & Load Testing Tools
 The application is pre-configured to work with the provided `docker-compose.yml`. 
 - **API Port**: `3000`
 - **Redis Host**: `localhost:6379`
-- **PostgreSQL**: `postgresql://johndoe:randompassword@localhost:5432/mobility_db`
+- **PostgreSQL**: `postgresql://user:password@localhost:5433/mobility_db`
 
 ## 6. Architecture Decisions
 

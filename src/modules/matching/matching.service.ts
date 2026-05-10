@@ -1,8 +1,10 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { RedisService } from '../../infrastructure/redis/redis.service';
-import { H3Service } from '../../infrastructure/h3.service';
-import { MatchingEngine, DriverCandidate } from './matching.engine';
+import { PrismaService } from '../../infrastructure/prisma/prisma.service';
+import { MatchingEngine } from './matching.engine';
 import { RideRequestDto } from './dto/ride-request.dto';
+import { gridDisk, latLngToCell } from 'h3-js';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 @Injectable()
 export class MatchingService {
@@ -10,37 +12,28 @@ export class MatchingService {
 
   constructor(
     private readonly redisService: RedisService,
-    private readonly h3Service: H3Service,
+    private readonly prisma: PrismaService,
     private readonly matchingEngine: MatchingEngine,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  async findBestMatches(dto: RideRequestDto) {
-    const { pickupLat, pickupLng } = dto;
+  async findBestMatches(dto: RideRequestDto, idempotencyKey: string) {
+    const { pickupLat, pickupLng, passengerId } = dto;
+    const centerCell = latLngToCell(pickupLat, pickupLng, 9);
+    const cellsToScan = gridDisk(centerCell, 1);
 
-    // 1. Identify Pickup Cell & Neighbors (kRing 1-3)
-    const pickupCell = this.h3Service.getLatLngToCell(pickupLat, pickupLng);
-    const cellsToSearch = this.h3Service.getNeighbors(pickupCell, 2); // Search 2 rings out
-
-    // 2. Fetch Driver IDs from Redis H3 Sets
     const driverIds = new Set<string>();
-    for (const cell of cellsToSearch) {
-      const ids = await this.redisService.getClient().smembers(`h3:${cell}`);
-      ids.forEach(id => driverIds.add(id));
+    for (const cell of cellsToScan) {
+      const ids = await this.redisService.getClient().smembers(`cell:${cell}:drivers`);
+      ids.forEach((id) => driverIds.add(id));
     }
 
-    if (driverIds.size === 0) {
-      return { matches: [], message: 'No drivers found in your area' };
-    }
-
-    // 3. Hydrate Driver Metadata & Filter
-    const candidates: DriverCandidate[] = [];
+    const candidates: any[] = [];
     for (const id of driverIds) {
       const meta = await this.redisService.getClient().hgetall(`driver:${id}:meta`);
       
-      // Filter out stale or offline drivers
-      if (!meta || meta.status === 'OFFLINE') continue;
+      if (!meta || meta.status === 'OFFLINE' || meta.status === 'ON-TRIP') continue;
       
-      // Check staleness (10s limit)
       const lastUpdate = parseInt(meta.updated_at);
       if (Date.now() - lastUpdate > 10000) continue;
 
@@ -48,26 +41,30 @@ export class MatchingService {
         id,
         lat: parseFloat(meta.lat),
         lng: parseFloat(meta.lng),
-        rating: parseFloat(meta.rating || '5.0'),
         status: meta.status,
+        rating: 4.5,
       });
     }
 
-    // 4. Rank using the Pure Engine
-    const matches = this.matchingEngine.rankDrivers(pickupLat, pickupLng, candidates);
+    const rankedMatches = this.matchingEngine.rankDrivers(pickupLat, pickupLng, candidates);
 
-    // 5. Store Match Proposal in Redis (30s TTL)
-    // In a real app, we'd generate a unique rideId here
-    const mockRideId = `ride_${Date.now()}`;
-    await this.redisService.getClient().set(
-      `match:${mockRideId}`,
-      JSON.stringify({ matches, request: dto }),
-      'EX', 30
-    );
+    const ride = await this.prisma.ride.create({
+      data: {
+        passengerId,
+        pickupLat,
+        pickupLng,
+        dropoffLat: dto.dropoffLat,
+        dropoffLng: dto.dropoffLng,
+        status: 'REQUESTED',
+        idempotencyKey,
+      },
+    });
+
+    this.eventEmitter.emit('ride.requested', { rideId: ride.id, passengerId, timestamp: new Date() });
 
     return {
-      rideId: mockRideId,
-      matches,
+      rideId: ride.id,
+      matches: rankedMatches,
     };
   }
 }

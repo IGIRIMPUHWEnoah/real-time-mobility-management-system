@@ -1,15 +1,25 @@
 import { NestFactory } from '@nestjs/core';
 import { MicroserviceOptions, Transport } from '@nestjs/microservices';
 import { ValidationPipe } from '@nestjs/common';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   
-  // 1. Enable Global Validation
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
-  // 2. Connect Redis Microservice for Pub/Sub
+  const config = new DocumentBuilder()
+    .setTitle('Real-Time Mobility System')
+    .setDescription('Kigali Ride-Matching Backend API')
+    .setVersion('1.0')
+    .addTag('Matching')
+    .addTag('Location')
+    .addTag('Assignment')
+    .build();
+  const document = SwaggerModule.createDocument(app, config);
+  SwaggerModule.setup('api', app, document);
+
   app.connectMicroservice<MicroserviceOptions>({
     transport: Transport.REDIS,
     options: {
@@ -18,11 +28,7 @@ async function bootstrap() {
     },
   });
 
-  // 3. Start all microservices and then the HTTP server
   await app.startAllMicroservices();
   await app.listen(process.env.PORT || 3000);
-  
-  console.log(`Application is running on: ${await app.getUrl()}`);
-  console.log(`Redis Microservice is listening...`);
 }
 bootstrap();

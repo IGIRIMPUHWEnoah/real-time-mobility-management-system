@@ -1,8 +1,8 @@
-import { Injectable, Logger, Inject } from '@nestjs/common';
-import { ClientProxy } from '@nestjs/microservices';
+import { Injectable, Logger } from '@nestjs/common';
 import { RedisService } from '../../infrastructure/redis/redis.service';
-import { H3Service } from '../../infrastructure/h3.service';
 import { UpdateLocationDto } from './dto/update-location.dto';
+import { latLngToCell } from 'h3-js';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 @Injectable()
 export class LocationService {
@@ -10,42 +10,38 @@ export class LocationService {
 
   constructor(
     private readonly redisService: RedisService,
-    private readonly h3Service: H3Service,
-    @Inject('REDIS_SERVICE') private readonly client: ClientProxy,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   async updateLocation(driverId: string, dto: UpdateLocationDto) {
     const { lat, lng, status } = dto;
+    const h3Cell = latLngToCell(lat, lng, 9);
 
-    // 1. Compute H3 Cell
-    const newCell = this.h3Service.getLatLngToCell(lat, lng);
-    
-    // 2. Get old cell from Redis to handle index cleanup
-    const driverMetaKey = `driver:${driverId}:meta`;
-    const oldMeta = await this.redisService.getClient().hgetall(driverMetaKey);
+    const oldMeta = await this.redisService.getClient().hgetall(`driver:${driverId}:meta`);
     const oldCell = oldMeta?.h3_cell;
 
-    // 3. Update Redis Hot Layer (GeoSet + Metadata)
+    const currentStatus = oldMeta?.status;
+    const finalStatus = (currentStatus === 'ON-TRIP') ? currentStatus : status;
+
     await this.redisService.updateDriverLocation(driverId, lat, lng, {
       ...dto,
-      h3_cell: newCell,
+      status: finalStatus,
+      h3_cell: h3Cell,
+      updated_at: Date.now().toString(),
     });
 
-    // 4. Update H3 Spatial Index (Remove from old cell, add to new)
-    if (oldCell !== newCell) {
-      await this.redisService.updateH3Index(oldCell, newCell, driverId);
+    if (oldCell && oldCell !== h3Cell) {
+      await this.redisService.getClient().srem(`cell:${oldCell}:drivers`, driverId);
     }
+    await this.redisService.getClient().sadd(`cell:${h3Cell}:drivers`, driverId);
 
-    // 5. Emit Event via Redis Pub/Sub
-    this.client.emit('driver.location.updated', {
+    this.eventEmitter.emit('driver.location_updated', {
       driverId,
       ...dto,
-      h3Cell: newCell,
+      h3Cell,
       timestamp: new Date(),
     });
 
-    this.logger.debug(`Location updated for driver ${driverId} in cell ${newCell}`);
-    
-    return { success: true, cell: newCell };
+    return { success: true, h3Cell };
   }
 }

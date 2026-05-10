@@ -1,81 +1,66 @@
-import { Injectable, Logger, ConflictException, Inject } from '@nestjs/common';
-import { ClientProxy } from '@nestjs/microservices';
-import { RedisService } from '../../infrastructure/redis/redis.service';
+import { Injectable, ConflictException, NotFoundException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
+import { RedisService } from '../../infrastructure/redis/redis.service';
 import { ConfirmMatchDto } from './dto/confirm-match.dto';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 @Injectable()
 export class AssignmentService {
   private readonly logger = new Logger(AssignmentService.name);
 
   constructor(
-    private readonly redisService: RedisService,
     private readonly prisma: PrismaService,
-    @Inject('REDIS_SERVICE') private readonly client: ClientProxy,
+    private readonly redisService: RedisService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   async confirmMatch(rideId: string, dto: ConfirmMatchDto) {
     const { driverId } = dto;
-    const lockKey = `driver:lock:${driverId}`;
+    const lockKey = `lock:driver:${driverId}`;
 
-    // --- LAYER 1: Redis Distributed Lock ---
-    const lockAcquired = await this.redisService.acquireLock(lockKey, 5000);
-    if (!lockAcquired) {
-      this.logger.warn(`Conflict: Driver ${driverId} lock already held`);
-      throw new ConflictException('Driver is currently being assigned to another ride');
+    const acquired = await this.redisService.getClient().set(lockKey, 'LOCKED', 'PX', 5000, 'NX');
+    if (!acquired) {
+      throw new ConflictException('Driver is currently being processed by another request');
     }
 
     try {
-      // --- LAYER 2: DB Transaction + Status Check ---
-      const result = await this.prisma.$transaction(async (tx) => {
-        // 1. Row-level lock on driver
-        const driver = await tx.$queryRaw`
-          SELECT id, status FROM drivers 
-          WHERE id = ${driverId}::uuid 
-          FOR UPDATE
-        `;
+      return await this.prisma.$transaction(async (tx) => {
+        const ride = await tx.ride.findUnique({ where: { id: rideId } });
+        if (!ride) throw new NotFoundException('Ride not found');
+        if (ride.status !== 'REQUESTED') throw new ConflictException('Ride is no longer in REQUESTED state');
 
-        if (!driver || driver[0]?.status !== 'AVAILABLE') {
+        const driver = await tx.driver.findUnique({ where: { id: driverId } });
+        if (!driver || driver.status !== 'AVAILABLE') {
           throw new ConflictException('Driver is no longer available');
         }
 
-        // 2. Update Driver status
         await tx.driver.update({
           where: { id: driverId },
           data: { status: 'ON_TRIP' },
         });
 
-        // 3. Create Assignment record
         const assignment = await tx.assignment.create({
           data: {
             rideId,
             driverId,
-            score: 1.0, // Mock score for now
+            score: 1.0,
             scoreBreakdown: {},
           },
         });
 
-        // 4. Update Ride status
         await tx.ride.update({
           where: { id: rideId },
           data: { status: 'CONFIRMED' },
         });
 
+        await this.redisService.getClient().hset(`driver:${driverId}:meta`, 'status', 'ON-TRIP');
+
+        this.eventEmitter.emit('match.confirmed', { rideId, driverId, timestamp: new Date() });
+
         return assignment;
       });
-
-      // Emit MatchConfirmed Event via Redis Pub/Sub
-      this.client.emit('match.confirmed', {
-        rideId,
-        driverId,
-        timestamp: new Date(),
-      });
-
-      return { success: true, assignmentId: result.id };
-
     } finally {
-      // Always release the lock
-      await this.redisService.releaseLock(lockKey);
+      await this.redisService.getClient().del(lockKey);
     }
   }
 }

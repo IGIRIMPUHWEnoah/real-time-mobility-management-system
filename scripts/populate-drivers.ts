@@ -1,46 +1,44 @@
-import { PrismaClient, VehicleType, DriverStatus } from '@prisma/client';
-import axios from 'axios';
+import { PrismaClient } from '@prisma/client';
+import Redis from 'ioredis';
+import { latLngToCell } from 'h3-js';
 
 const prisma = new PrismaClient();
-const BASE_URL = 'http://localhost:3000';
+const redis = new Redis();
 
 async function main() {
-  console.log('🧹 Cleaning old data...');
-  await prisma.assignment.deleteMany({});
-  await prisma.ride.deleteMany({});
-  await prisma.driverLocation.deleteMany({});
-  await prisma.driver.deleteMany({});
+  await prisma.ride.deleteMany();
+  await prisma.assignment.deleteMany();
+  await prisma.driver.deleteMany();
 
-  console.log('👤 Creating 100 test drivers...');
-  const drivers: Array<{id: string, name: string, rating: number, vehicleType: VehicleType, status: DriverStatus}> = [];
+  const driversData: any[] = [];
   for (let i = 0; i < 100; i++) {
-    const id = `550e8400-e29b-41d4-a716-44665544${i.toString().padStart(4, '0')}`;
-    drivers.push({
-      id,
+    driversData.push({
+      id: `550e8400-e29b-41d4-a716-44665544${i.toString().padStart(4, '0')}`,
       name: `Driver ${i}`,
       rating: 4.0 + Math.random(),
-      vehicleType: VehicleType.CAR,
-      status: DriverStatus.AVAILABLE,
+      vehicleType: 'CAR',
+      status: 'AVAILABLE'
     });
   }
 
-  await prisma.driver.createMany({ data: drivers });
-  console.log('✅ 100 Drivers created in Database.');
+  await prisma.driver.createMany({ data: driversData });
+  console.log('Database drivers created.');
 
-  console.log('📍 Sending 100 location updates to Redis...');
-  const updates = drivers.map(d => 
-    axios.post(`${BASE_URL}/drivers/${d.id}/location`, {
-      lat: -1.9441 + (Math.random() - 0.5) * 0.01,
-      lng: 30.0619 + (Math.random() - 0.5) * 0.01,
-      heading: Math.floor(Math.random() * 360),
-      speedKmh: 30 + Math.random() * 20,
-      status: 'AVAILABLE'
-    }).catch(e => console.error(`Failed to update ${d.id}`))
-  );
+  const updates = driversData.map(d => {
+    const lat = -1.9441 + (Math.random() - 0.5) * 0.05;
+    const lng = 30.0619 + (Math.random() - 0.5) * 0.05;
+    const cellId = latLngToCell(lat, lng, 9);
+    return redis.hset(`driver:${d.id}:meta`, {
+      lat,
+      lng,
+      h3_cell: cellId,
+      status: 'AVAILABLE',
+      updated_at: Date.now()
+    });
+  });
 
   await Promise.all(updates);
-  console.log('✅ Redis Spatial Index populated.');
-  console.log('\n🚀 READY FOR TESTING! Go to Postman and request a match.');
+  console.log('Redis spatial index populated.');
 }
 
 main()
